@@ -1,0 +1,444 @@
+import * as Uuid from 'uuid';
+import { Location } from '@angular/common';
+import { Component, NgZone, OnDestroy, OnInit } from '@angular/core';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
+import { ActivatedRoute, Router } from '@angular/router';
+import { Subject, Subscription } from 'rxjs';
+import { timeout } from 'rxjs/operators';
+import { OitConfigurationStateFacade } from '../../state-services';
+import { ICanSaveData } from '../../models';
+
+@Component({
+  selector: 'oit-angular-js',
+  templateUrl: './angular-js.component.html',
+  styleUrls: ['./angular-js.component.css']
+})
+export class AngularJsComponent implements OnInit, OnDestroy, ICanSaveData {
+  static OIT_IframeId: string;
+  static OIT_IfFrameSrc: string;
+
+  iFrameSrc: SafeResourceUrl;
+  iFrameId: string;
+  mesageKey: string;
+
+  get isDirty(): boolean {
+    return this._isDirty;
+  }
+  set isDirty(value: boolean) {
+    if (value !== this._isDirty) {
+      this._isDirty = value;
+    }
+  }
+  private _isDirty: boolean;
+  private message: ICanSaveDataMessage;
+
+  private url: string;
+  private previousUrl: string;
+  private path: string;
+  private baseUrl: string;
+  private saveComplete = false;
+  private saveSuccessful = false;
+  private pollForSaveCompleted: Subscription;
+  private saveComplete$ = new Subject<boolean>();
+  private iFrameLoadedHandler;
+  private $injector;
+  private $rootScope;
+  private navToState: string;
+  private navToParams: string;
+
+  constructor(
+    private zone: NgZone,
+    private route: ActivatedRoute,
+    private router: Router,
+    private location: Location,
+    private sanitizer: DomSanitizer,
+    private oitConfigurationStateFacade: OitConfigurationStateFacade
+  ) {
+    const prevNav = this.router.getCurrentNavigation();
+    this.previousUrl = prevNav && prevNav.previousNavigation && prevNav.previousNavigation.finalUrl.toString();
+    this.initializeEventListener();
+    if (!AngularJsComponent.OIT_IframeId) {
+      AngularJsComponent.OIT_IframeId = 'oit-' + Uuid.v4();
+    }
+    this.iFrameId = AngularJsComponent.OIT_IframeId;
+    this.mesageKey = this.iFrameId + '.parent';
+  }
+
+  ngOnInit(): void {
+    let baseFolder = this.oitConfigurationStateFacade.baseDirectory;
+
+    // this.baseUrl = this.oitConfigurationStateFacade.baseDirectory + 'assets/oit/index.html#';
+    if (baseFolder.length > 1) {
+      this.baseUrl = '/modern' + baseFolder;
+    } else {
+      this.baseUrl = '/';
+    }
+    this.baseUrl = location.origin + this.baseUrl + 'assets/oit/index.html#/';
+
+    this.url = this.determineAngularJsUrl();
+    console.error(`AngularJs OnInit() iframe.src=${JSON.stringify(this.url)} href:${window.location.href}`);
+    this.iFrameSrc = this.sanitizer.bypassSecurityTrustResourceUrl(this.url);
+    // this.oitIFrameSource.updateSource(this.url);
+    console.error(`AngularJs OnInit() iframe.src=${JSON.stringify(this.iFrameSrc)} href:${window.location.href}`);
+
+    this.iFrameLoadedHandler = setInterval(() => {
+      this.waitForIframeToLoad();
+    }, 2500);
+  }
+
+  ngOnDestroy() {
+    console.log(`AngularJs onDestroy() iframe.src=${JSON.stringify(this.url)} href:${window.location.href}`);
+    this.killEventListener();
+
+    const frame: any = document.getElementById(this.iFrameId);
+    let frameDoc = frame.contentDocument || frame.contentWindow.document;
+    frameDoc.documentElement.innerHTML = '';
+
+    this.iFrameSrc = null;
+    // this.oitIFrameSource.updateSource('');
+  }
+
+  determineAngularJsUrl(): string {
+    // example    /home/intlchart/chartlistbytype/src
+    let path = this.router.routerState.snapshot.url;
+    const state = this.route.snapshot.url[0].path;
+    let params = {};
+
+    let url;
+    if (!url && path.indexOf('binderproperties') >= 0) {
+      const parts = path.split('/');
+      if (parts.length > 2) {
+        const binderId = parts[parts.length - 2];
+        url = this.baseUrl + `oit/binders/${binderId}/properties`;
+      }
+    }
+    if (!url && path.indexOf('entityproperties') >= 0) {
+      const parts = path.split('/');
+      if (parts.length > 2) {
+        const binderId = parts[parts.length - 2];
+        url = this.baseUrl + `oit/entity`;
+      }
+    }
+
+    if (!url && path.indexOf('/home') >= 0) {
+      path = path.replace('/home', '');
+
+      if (path.indexOf('stateaachartlist') >= 0) {
+        // need to process this scenario first
+        url = this.baseUrl + 'oit/stateaachartlist?chartType=' + this.route.snapshot.url[1].path;
+      }
+
+      if (path.indexOf('chartlistbytype') >= 0) {
+        // need to process this scenario first
+        url = this.baseUrl + 'oit/chartlistbytype?chartType=' + this.route.snapshot.url[1].path;
+      }
+
+      if (!url && path.indexOf('/binderidentificationwizard') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+
+      if (!url && path.indexOf('/chart/') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/chartsyncall') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+
+      if (!url && path.indexOf('/batch/') >= 0) {
+        if (path.indexOf('/batchprocess') >= 0) {
+          url = this.baseUrl + 'oit/' + state + '/' + this.route.snapshot.url[1].path;
+        } else {
+          url = this.baseUrl + 'oit/' + state;
+        }
+      }
+
+      if (
+        !url &&
+        (path.indexOf('/dcexport') >= 0 || path.indexOf('/dcimport') >= 0 || path.indexOf('/dcimportexportstatus') >= 0)
+      ) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/downloadclient') >= 0) {
+        url = this.baseUrl + 'oit/' + state + '?year=' + this.route.snapshot.url[1].path;
+      }
+      if (!url && path.indexOf('/enterpriseoptions') >= 0) {
+        if (!url && path.indexOf('/stateapportionment') >= 0) {
+          url = this.baseUrl + 'oit/enterpriseoptions?action=ID_STATEAPPOPT';
+        }
+        if (!url && path.indexOf('/dataflow') >= 0) {
+          url = this.baseUrl + 'oit/enterpriseoptions?action=ID_DATAFLOWTRANSFER';
+        }
+        if (!url && path.indexOf('/rettoprovavail') >= 0) {
+          url = this.baseUrl + 'oit/enterpriseoptions?action=ID_RETTOPROVAVAIL';
+        }
+      }
+      if (!url && path.indexOf('/exceladdindownload') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/federaladjustmentwp') >= 0) {
+        url = this.baseUrl + 'oit/' + state + '?year=&batchId=&launchedFromProvisions=';
+      }
+      if (!url && path.indexOf('/fcoachartadjustment') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/glm') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/globalreadonly') >= 0) {
+        url = this.baseUrl + 'oit/securityreadonly?ID=&MENU=tools&name=&TOOLS=1&Yr=';
+      }
+      if (!url && path.indexOf('/foreignformdefaultfiler') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+
+      if (!url && path.indexOf('/intlchart/') >= 0) {
+        url = this.baseUrl + 'oit/' + state + '/' + this.route.snapshot.url[1].path;
+      }
+      if (!url && path.indexOf('/profservice') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/provisiontransfer') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/releaseinfo') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/rollover/') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/setupsecurityoptions') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/sysacctinfo') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/transferstatus') >= 0) {
+        url = this.baseUrl + 'oit/' + state;
+      }
+      if (!url && path.indexOf('/efile/') >= 0) {
+        url = this.baseUrl + 'oit/' + state + '/' + this.route.snapshot.url[1].path;
+      }
+    }
+
+    if (!url && path.indexOf('/reports/') >= 0) {
+      url = this.baseUrl + 'oit/reports';
+      this.navToState = 'oit.reports';
+      let navType;
+      switch (state) {
+        case 'binderfavs':
+          navType = 'binderFavs';
+          break;
+        case 'binderprop':
+          navType = 'binderProp';
+          break;
+        case 'bindertas':
+          navType = 'binderTAS';
+          break;
+        case 'bindertasintl':
+          navType = 'binderTASIntl';
+          break;
+        case 'entityproperties':
+          navType = 'entityProperties';
+          break;
+        default:
+          // case is the same
+          navType = state;
+      }
+      const binderId = this.route.snapshot.queryParams.binderId;
+      const year = this.route.snapshot.queryParams.year;
+      params = {
+        binderId: binderId,
+        year: year
+      };
+      const reportCategory = this.route.snapshot.queryParams.reportcategory;
+      if (reportCategory) {
+        params['reportCategory'] = reportCategory;
+      }
+      const entity = this.route.snapshot.queryParams.entity;
+      if (entity) {
+        params['entity'] = entity;
+      }
+      const entityId = this.route.snapshot.queryParams.entityid;
+      if (entityId) {
+        params['entityId'] = entityId;
+      }
+      // if (navType) {
+      //   params['navType'] = navType;
+      // }
+    }
+    this.navToParams = JSON.stringify(params);
+
+    if (!url && state === 'htmlreports') {
+      const queryParams = this.route.snapshot.queryParams;
+
+      url =
+        this.baseUrl +
+        `oit/${state}/${queryParams.reportId}?` +
+        Object.keys(queryParams)
+          .map((key) => {
+            return `${key}=${queryParams[key]}`;
+          })
+          .join('&');
+    }
+
+    if (!url && state === 'chartexchangerates') {
+      url = this.baseUrl + 'oit/' + state + '/' + this.route.snapshot.url[1].path;
+    }
+
+    if (!url && path.indexOf('/binders/') >= 0) {
+      const moduleId = this.route.snapshot.params.menuid;
+      const binderId = this.route.snapshot.parent.params.binderid;
+      // this.navToState = 'oit.binder.taxaccountingsystem';
+      // this.navToParams = JSON.stringify({
+      //   binderId: binderId,
+      //   moduleId: moduleId
+      // });
+
+      // url = this.baseUrl + `oit/binders/${binderId}/taxaccountingsystem`;
+      url = this.baseUrl + `oit/binders/${binderId}/taxaccountingsystem`;
+      if (moduleId) {
+        url += '/' + moduleId;
+        // url += 'null/';
+      }
+      // url += state;
+      // this.navToState += state;
+    }
+
+    console.log(`Angular => AngularJs url=${url}`);
+    return url;
+  }
+
+  saveData(): Promise<boolean> {
+    let message = {
+      iFrameId: this.iFrameId,
+      isDirty: this.isDirty,
+      doSave: true,
+      saveComplete: false,
+      saveSuccessful: false
+    } as ICanSaveDataMessage;
+
+    return this.sendMessage(message);
+  }
+
+  private sendMessage(message: ICanSaveDataMessage): Promise<boolean> {
+    this.saveComplete = false;
+    this.saveSuccessful = false;
+
+    // LocalStorageService.set(message.iFrameId, JSON.stringify(message));
+    this.$rootScope.$emit(this.iFrameId, JSON.stringify(message));
+
+    return new Promise((resolve, reject) => {
+      this.saveComplete$.pipe(timeout(30000)).subscribe(
+        () => {
+          console.log('AngularJsComponent save has completed');
+          resolve(true);
+        },
+        (err) => {
+          console.log('AngularJsComponent save errored out. err:' + err);
+          reject(false);
+        }
+      );
+    });
+  }
+
+  private waitForIframeToLoad() {
+    // Get a handle to the iframe element
+    var iframe: any = document.getElementById(this.iFrameId);
+    var iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+    console.log('AngularJsComponent waitForIframeToLoad readyState: ' + iframeDoc.readyState);
+
+    // Check if loading is complete
+    if (iframeDoc.readyState == 'complete') {
+      console.log('AngularJsComponent waitForIframeToLoad iframe Loaded. Waiting for Angular');
+
+      try {
+        const iFrameWindow = iframe.contentWindow || iframe;
+        if (iFrameWindow['angular']) {
+          const body = iFrameWindow.document.body;
+          this.$injector = (iFrameWindow as any).angular.element(body).injector();
+          this.$rootScope = this.$injector.get('$rootScope');
+
+          console.log('AngularJsComponent setting up handleJSEvent for key:' + this.iFrameId);
+          this.$rootScope.$on(this.mesageKey, (event, message) => {
+            this.handleJSEvent(event, message);
+          });
+
+          this.$rootScope.$on('oitng-routeto', (event, message) => {
+            this.handleRouteToJSEvent(event, message);
+          });
+
+          this.$rootScope.$on('oitng-navback', (event, message) => {
+            this.zone.run(() => {
+              this.router.navigateByUrl(this.previousUrl);
+            });
+          });
+
+          clearInterval(this.iFrameLoadedHandler);
+          console.log('AngularJsComponent iFrame loaded');
+          // if (this.navToState) {
+          //   this.zone.run(() => {
+          //     this.$rootScope.$broadcast('oit:angular.iframe.statechange', this.navToState, this.navToParams);
+          //   }, 5000);
+          // }
+        }
+      } catch (err) {
+        console.error('AngularJsComponent iFrame angular exception:' + err);
+      }
+      return;
+    }
+  }
+
+  private handleJSEvent(event, messageValue) {
+    this.handleEvent(messageValue);
+  }
+
+  private handleRouteToJSEvent(event, messageValue) {
+    if (messageValue === 'oit-ng.binders.allbinders') {
+      this.zone.run(() => {
+        this.router.navigate(['/home/binders']);
+      });
+      return;
+    }
+  }
+
+  private handleStorageEvents(event: any) {
+    console.log('AngularJsComponent storage event: ' + event.newValue);
+    if (event.key !== this.iFrameId) {
+      return;
+    }
+
+    this.handleEvent(event.newValue);
+  }
+
+  private handleEvent(messageValue: string) {
+    console.log('AngularJsComponent handleEvent message:' + messageValue);
+    const message = JSON.parse(messageValue) as ICanSaveDataMessage;
+
+    this.isDirty = message.isDirty;
+    this.saveComplete = message.saveComplete;
+    this.saveSuccessful = message.saveSuccessful;
+    if (this.saveComplete) {
+      this.saveComplete$.next(true);
+    }
+  }
+
+  private initializeEventListener() {
+    console.log('AngularJsComponent Adding Event listener');
+    window.addEventListener('storage', () => {
+      this.handleStorageEvents;
+    });
+  }
+
+  private killEventListener() {
+    console.log('AngularJsComponent Killing Event listener');
+    window.removeEventListener('storage', this.handleStorageEvents);
+  }
+}
+
+export interface ICanSaveDataMessage {
+  iFrameId: string;
+  isDirty: boolean; // typically message sent from OIT IFrame to oit-ng listener.
+  doSave: boolean; // message sent to OIT Iframe from oit-ng to perform the save logic.
+  saveComplete: boolean; // response from doSave logic in OIT when the save logic completes.
+  saveSuccessful: boolean; // response from doSave logic in OIT
+}
